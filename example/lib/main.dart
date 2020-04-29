@@ -4,10 +4,15 @@ import 'dart:convert';
 import 'package:aws_appsync/aws_appsync.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_json_widget/flutter_json_widget.dart';
+import 'package:sembast/sembast_io.dart';
+import 'package:super_logging/super_logging.dart';
 
 import 'progress_mixin.dart';
 
-void main() => runApp(MyApp());
+void main() async {
+  await SuperLogging.main();
+  runApp(MyApp());
+}
 
 class MyApp extends StatelessWidget {
   @override
@@ -28,12 +33,54 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage>
     with ProgressMixin<MyHomePage> {
-  final endpoint = TextEditingController();
-  final query = TextEditingController();
+  final endpoint = TextEditingController(
+    text:
+        'https://kdsnweku3zbufknjcyda4arel4.appsync-api.ap-south-1.amazonaws.com/graphql',
+  );
+  final query = TextEditingController(
+    text: r'''
+query ListLessons(
+  $filter: TableLessonFilterInput
+  $limit: Int
+  $nextToken: String
+) {
+  listLessons(filter: $filter, limit: $limit, nextToken: $nextToken) {
+    items {
+      sourceId
+      chapterId
+      chapterName
+      chapterNumber
+      colour
+      curriculum
+      grade
+      lessonName
+      lessonNumber
+      pages
+      pdfLanguage
+      s3Key
+      slides
+      semester
+      subject
+      subjectSubtypes
+      subjectSubtype
+      updatedAt
+      tags
+      metadataOK
+      potentialDuplicate
+      duplicate
+      password
+    }
+    nextToken
+  }
+}
+''',
+  );
   final variables = TextEditingController(text: '{}');
   final accessToken = TextEditingController();
 
   var results;
+  var cacheEnabled = true;
+  var priority = CachePriority.network;
   Duration timeTaken;
 
   @override
@@ -76,6 +123,35 @@ class _MyHomePageState extends State<MyHomePage>
                   ),
                 ),
                 Divider(),
+                CheckboxListTile(
+                  value: cacheEnabled,
+                  onChanged: (value) {
+                    setState(() {
+                      cacheEnabled = value;
+                    });
+                  },
+                  title: Text('cache enabled'),
+                ),
+                if (cacheEnabled)
+                  DropdownButton(
+                    value: priority,
+                    onChanged: (value) {
+                      setState(() {
+                        priority = value;
+                      });
+                    },
+                    items: [
+                      DropdownMenuItem(
+                        value: CachePriority.network,
+                        child: Text('${CachePriority.network}'),
+                      ),
+                      DropdownMenuItem(
+                        value: CachePriority.cache,
+                        child: Text('${CachePriority.cache}'),
+                      )
+                    ],
+                  ),
+                Divider(),
                 Wrap(
                   alignment: WrapAlignment.center,
                   spacing: 16,
@@ -85,16 +161,12 @@ class _MyHomePageState extends State<MyHomePage>
                       onPressed: createOnPressed(execute),
                     ),
                     RaisedButton(
-                      child: Text('execute (cache enabled)'),
-                      onPressed: createOnPressed(executeWithCache),
-                    ),
-                    RaisedButton(
                       child: Text('paginate'),
                       onPressed: createOnPressed(paginate),
                     ),
                     RaisedButton(
-                      child: Text('paginate (cache enabled)'),
-                      onPressed: createOnPressed(paginateWithCache),
+                      child: Text('delete db'),
+                      onPressed: createOnPressed(deleteDB),
                     ),
                   ],
                 ),
@@ -128,16 +200,8 @@ class _MyHomePageState extends State<MyHomePage>
       query: query.text,
       variables: jsonDecode(variables.text.trim()),
       accessToken: accessToken.text,
-    );
-  }
-
-  Future<dynamic> executeWithCache() async {
-    return await appSync.execute(
-      endpoint: endpoint.text.trim(),
-      query: query.text,
-      variables: jsonDecode(variables.text.trim()),
-      accessToken: accessToken.text,
-      cache: await appSync.getCacheDatabase(),
+      cache: cacheEnabled ? await appSync.getCacheDatabase() : null,
+      priority: priority,
     );
   }
 
@@ -147,18 +211,15 @@ class _MyHomePageState extends State<MyHomePage>
       query: query.text,
       variables: jsonDecode(variables.text.trim()),
       accessToken: accessToken.text,
+      cache: cacheEnabled ? await appSync.getCacheDatabase() : null,
+      priority: priority,
     );
   }
 
-  Future<dynamic> paginateWithCache() async {
-    return appSync.paginate(
-      endpoint: endpoint.text.trim(),
-      query: query.text,
-      variables: jsonDecode(variables.text.trim()),
-      accessToken: accessToken.text,
-      cache: await appSync.getCacheDatabase(),
-      batchSize: 500,
-    );
+  Future<void> deleteDB() async {
+    var db = await appSync.getCacheDatabase();
+    await db.close();
+    await databaseFactoryIo.deleteDatabase(db.path);
   }
 
   ProgressMixinTaskWrapper createOnPressed(ProgressMixinTask fn) {

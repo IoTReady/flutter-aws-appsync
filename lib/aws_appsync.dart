@@ -3,11 +3,30 @@ import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
 import 'package:http/http.dart' as http;
+import 'package:logging/logging.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sembast/sembast.dart';
 import 'package:sembast/sembast_io.dart';
 
+enum CachePriority {
+  /// Use network if available, use cache as fallback.
+  ///
+  /// [AppSync.isNetworkError] is used to determine if an exception should be treated as a network error.
+  ///
+  /// If neither cache nor network is available, network errors will be not be caught.
+  /// This is done to avoid a `null` return value.
+  network,
+
+  /// Use cache if available, use network as fallback.
+  ///
+  /// In this mode, network errors won't be caught at all.
+  /// This is done to avoid a `null` return value.
+  cache
+}
+
 class AppSync {
+  final logger = Logger('AppSync');
+
   /// The duration after which cache is invalidated
   ///
   /// Set to 24 hours by default.
@@ -21,10 +40,8 @@ class AppSync {
   ///
   /// The query must accept the `limit` and `nextToken` variables.
   ///
-  /// If [cache] is passed,
-  /// then this will automatically call [readCache] and [updateCache] with that [Database].
-  ///
   /// Internally, this delegates to [execute] in a loop to execute queries.
+  /// Refer to its documentation.
   Stream<Map> paginate({
     @required String endpoint,
     int batchSize: 100,
@@ -32,6 +49,7 @@ class AppSync {
     @required Map variables,
     @required String accessToken,
     Database cache,
+    CachePriority priority = CachePriority.network,
   }) async* {
     String nextToken;
 
@@ -46,17 +64,20 @@ class AppSync {
         },
         accessToken: accessToken,
         cache: cache,
+        priority: priority,
       );
-
+      nextToken = extractNextToken(data);
       yield data;
-
-      for (var item in data.values) {
-        if (item is Map && item.containsKey('nextToken')) {
-          nextToken = item["nextToken"];
-          break;
-        }
-      }
     } while (nextToken != null);
+  }
+
+  String extractNextToken(Map data) {
+    for (var item in data.values) {
+      if (item is Map && item.containsKey('nextToken')) {
+        return item["nextToken"];
+      }
+    }
+    return null;
   }
 
   /// Execute a GraphQL query without pagination.
@@ -65,56 +86,98 @@ class AppSync {
   ///
   /// If [cache] is passed,
   /// then this will automatically call [readCache] and [updateCache] with that [Database].
+  ///
+  /// Use [priority] to control when and how cache should be used.
+  /// This has no effect if [cache] is `null`.
   Future<Map> execute({
     @required String endpoint,
     @required String query,
     @required Map variables,
     @required String accessToken,
     Database cache,
+    CachePriority priority = CachePriority.network,
   }) async {
-    int cacheKey;
     var body = jsonEncode({"query": query, "variables": variables});
 
-    if (cache != null) {
-      cacheKey = getCacheKey(endpoint, body);
+    Future<Map> loadFromCache() async {
+      var cacheKey = getCacheKey(endpoint, body);
       var data = await readCache(cache, cacheKey);
-      print('$cacheKey ${data != null}');
+      if (data != null) {
+        logger.fine(
+          'loaded from cache (endpoint: ${endpoint.toRepr()}, requestBody: ${body.toRepr()}, cacheKey: $cacheKey)',
+        );
+      }
+      return data;
+    }
+
+    if (cache != null && priority == CachePriority.cache) {
+      var data = await loadFromCache();
+      if (data != null) return data;
+    }
+
+    logger.fine('POST ${endpoint.toRepr()} - ${body.toRepr()}');
+
+    http.Response response;
+    try {
+      response = await http.post(
+        endpoint,
+        headers: {
+          HttpHeaders.authorizationHeader: accessToken,
+          HttpHeaders.contentTypeHeader: ContentType.json.mimeType,
+        },
+        body: body,
+      );
+    } catch (e) {
+      var shouldFallback = cache != null && priority == CachePriority.network;
+      if (!shouldFallback || !isNetworkError(e)) rethrow;
+
+      logger.finest('network error encountered; falling back to cache - $e');
+
+      var data = await loadFromCache();
       if (data != null) {
         return data;
+      } else {
+        rethrow;
       }
     }
 
-    var response = await http.post(
-      endpoint,
-      headers: {
-        HttpHeaders.authorizationHeader: accessToken,
-        HttpHeaders.contentTypeHeader: ContentType.json.mimeType,
-      },
-      body: body,
-    );
     if (response.statusCode != HttpStatus.ok) {
       throw HttpError(response);
     }
 
+    logger.fine(
+      'loaded from network (endpoint: ${endpoint.toRepr()}, requestBody: ${body.toRepr()})',
+    );
     var result = jsonDecode(response.body);
     var data = result["data"];
 
-    if (cacheKey != null) {
+    if (cache != null) {
+      var cacheKey = getCacheKey(endpoint, body);
       await updateCache(cache, cacheKey, data);
+      logger.fine(
+        'updated cache (endpoint: ${endpoint.toRepr()}, requestBody: ${body.toRepr()}, cacheKey: $cacheKey)',
+      );
     }
 
     return data;
   }
 
+  /// Return whether [e] should be treated as a network error
+  bool isNetworkError(dynamic e) => e is SocketException;
+
+  /// Get a unique key for caching a request
+  ///
+  /// [endpoint] - same as [execute]'s parameter.
+  /// [requestBody] - the HTTP request body.
   int getCacheKey(String endpoint, String requestBody) {
     return hashValues(endpoint, requestBody);
   }
 
-  final store = StoreRef.main();
+  final _store = StoreRef.main();
 
   /// Read cache from [db] using [cacheKey].
   Future<Map> readCache(Database db, int cacheKey) async {
-    var rec = store.record(cacheKey);
+    var rec = _store.record(cacheKey);
     var entry = await rec.get(db) as Map;
     if (entry == null || isCacheEntryExpired(entry)) {
       return null;
@@ -140,7 +203,7 @@ class AppSync {
     var entry = {'timestampMillis': now.millisecondsSinceEpoch, 'data': data};
 
     return await db.transaction((txn) async {
-      await store.record(cacheKey).put(txn, entry);
+      await _store.record(cacheKey).put(txn, entry);
       await invalidateCache(txn);
     });
   }
@@ -157,7 +220,10 @@ class AppSync {
     var filter = Filter.lessThan('timestampMillis', oldestValid);
     var finder = Finder(filter: filter);
 
-    return await store.delete(txn, finder: finder);
+    var n = await _store.delete(txn, finder: finder);
+    logger.finest('invalidated $n cache entries (cacheExpiry: $cacheExpiry)');
+
+    return n;
   }
 
   /// Get database at `'root/aws_appsync_cache.db'`.
@@ -169,7 +235,7 @@ class AppSync {
 }
 
 extension StringRepr on String {
-  String toRepr() => replaceAll('\n', '\\n');
+  String toRepr() => "'" + replaceAll('\n', '\\n') + "'";
 }
 
 class HttpError implements Exception {
@@ -180,6 +246,6 @@ class HttpError implements Exception {
   @override
   String toString() {
     var repr = response.body.toRepr();
-    return "$runtimeType ${response.statusCode}: '$repr'";
+    return "$runtimeType ${response.statusCode} - $repr";
   }
 }
