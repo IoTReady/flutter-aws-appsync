@@ -33,48 +33,8 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage>
     with ProgressMixin<MyHomePage> {
-  final endpoint = TextEditingController(
-    text:
-        'https://kdsnweku3zbufknjcyda4arel4.appsync-api.ap-south-1.amazonaws.com/graphql',
-  );
-  final query = TextEditingController(
-    text: r'''
-query ListLessons(
-  $filter: TableLessonFilterInput
-  $limit: Int
-  $nextToken: String
-) {
-  listLessons(filter: $filter, limit: $limit, nextToken: $nextToken) {
-    items {
-      sourceId
-      chapterId
-      chapterName
-      chapterNumber
-      colour
-      curriculum
-      grade
-      lessonName
-      lessonNumber
-      pages
-      pdfLanguage
-      s3Key
-      slides
-      semester
-      subject
-      subjectSubtypes
-      subjectSubtype
-      updatedAt
-      tags
-      metadataOK
-      potentialDuplicate
-      duplicate
-      password
-    }
-    nextToken
-  }
-}
-''',
-  );
+  final endpoint = TextEditingController();
+  final query = TextEditingController();
   final variables = TextEditingController(text: '{}');
   final accessToken = TextEditingController();
 
